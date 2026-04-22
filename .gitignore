@@ -1,0 +1,16 @@
+.DS_Store
+
+# Go build/test artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Local binaries
+/bump-brat
