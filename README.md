@@ -24,6 +24,8 @@ cp .env.example .env  # then edit with your values
 make run
 ```
 
+**Note:** Before running, ensure your `app-interface` fork is synced with upstream. The tool will automatically sync the branch it creates, but having an up-to-date fork helps avoid conflicts.
+
 Use arrow keys to navigate, press **enter** to bump a project, press **q** to quit.
 
 ## Authentication
@@ -167,10 +169,31 @@ make build
 ./bump-brat
 ```
 
+## Testing
+
+Run the test suite:
+
+```bash
+# Run all tests
+make test
+
+# Run tests verbosely (without caching)
+make test-verbose
+```
+
+Tests include:
+- Utility functions (SHA handling, URL normalization, path handling)
+- Configuration loading (.env, YAML, JIRA config)
+- JIRA integration (payload building, API calls with mocked server)
+- YAML parsing (project refs extraction, production namespace detection)
+- GitLab helpers (URL building, settings validation)
+
 ## Make Targets
 
 ```bash
-make build  # build bump-brat binary
-make run    # run directly with go run
-make clean  # remove built binary
+make build         # build bump-brat binary
+make run           # run directly with go run
+make clean         # remove built binary
+make test          # run test suite
+make test-verbose  # run tests verbosely without cache
 ```
