@@ -15,6 +15,7 @@ coverage.out
 # Local binaries
 /bump-brat
 /bump-frontend
+/jira/create-jira-ticket
 
 # Local environment variables
 .env

@@ -109,6 +109,28 @@ projects:
     repo_url: https://github.com/RedHatInsights/your-frontend
 ```
 
+## Creating JIRA Tickets
+
+JIRA ticket creation tools are in the `jira/` directory:
+
+```bash
+cd jira
+
+# Build the tool
+make
+
+# Configure your fields
+cp jira_fields_config.json.example jira_fields_config.json
+# Edit jira_fields_config.json
+
+# Create a ticket
+./create-jira-ticket \
+    --summary "Bump frontend hashes" \
+    --description "Update production hashes for Q2 release"
+```
+
+See `jira/README.md` for quick start and `jira/JIRA_TICKET_CREATION.md` for full documentation.
+
 ## Building from Source
 
 ```bash
