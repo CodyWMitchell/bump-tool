@@ -37,6 +37,7 @@ func main() {
 	description := flag.String("description", "", "Ticket description (required)")
 	dryRun := flag.Bool("dry-run", false, "Print payload without creating ticket")
 	configPath := flag.String("config", "jira_fields_config.json", "Path to config file")
+	postToSlackFlag := flag.Bool("post-to-slack", false, "Post ticket to Slack workflow")
 	flag.Parse()
 
 	if *summary == "" || *description == "" {
@@ -84,10 +85,21 @@ func main() {
 
 	// Print success
 	fmt.Printf("\n✓ Successfully created ticket: %s\n", issueKey)
-	fmt.Printf("  URL: %s/browse/%s\n", jiraURL, issueKey)
+	ticketURL := fmt.Sprintf("%s/browse/%s", jiraURL, issueKey)
+	fmt.Printf("  URL: %s\n", ticketURL)
 	fmt.Printf("  Team: %s\n", config.Team)
 	fmt.Printf("  Labels: %s\n", joinStrings(config.Labels))
 	fmt.Printf("  Components: %s\n", joinStrings(config.Components))
+
+	// Post to Slack if flag is set
+	if *postToSlackFlag {
+		slackWebhookURL := "https://hooks.slack.com/triggers/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"
+		if err := postToSlack(slackWebhookURL, issueKey, ticketURL, *summary, *description, config); err != nil {
+			fmt.Printf("\n⚠ Warning: Failed to post to Slack: %v\n", err)
+		} else {
+			fmt.Printf("\n✓ Posted to Slack\n")
+		}
+	}
 }
 
 func loadConfig(path string) (*Config, error) {
