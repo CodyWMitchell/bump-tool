@@ -5,17 +5,17 @@ Create JIRA tickets with predefined fields from configuration.
 ## Quick Start
 
 ```bash
-cd jira-tools
+cd jira
 
-# 1. Install dependencies (from repo root)
-pip3 install -r ../requirements.txt
+# 1. Build the tool
+make
 
 # 2. Configure your fields
 cp jira_fields_config.json.example jira_fields_config.json
 # Edit jira_fields_config.json
 
 # 3. Create a ticket
-python3 create_jira_ticket.py \
+./create-jira-ticket \
     --summary "Your ticket title" \
     --description "Your ticket description" \
     --dry-run
@@ -23,10 +23,10 @@ python3 create_jira_ticket.py \
 
 ## Files
 
-- **`create_jira_ticket.py`** - Main script to create JIRA tickets
+- **`create-jira-ticket.go`** - Main Go source file
+- **`create-jira-ticket`** - Compiled binary (gitignored)
 - **`jira_fields_config.json`** - Configuration for ticket fields
-- **`find_team_field.py`** - Helper to find team field ID in your JIRA instance
-- **`test_jira_create.sh`** - Test script with examples
+- **`Makefile`** - Build commands
 - **`JIRA_TICKET_CREATION.md`** - Full documentation
 
 ## Configuration
@@ -65,7 +65,7 @@ JIRA_API_TOKEN=your-jira-api-token
 ### Create a Ticket
 
 ```bash
-python3 create_jira_ticket.py \
+./create-jira-ticket \
     --summary "Fix login bug" \
     --description "Users can't log in after upgrade"
 ```
@@ -73,7 +73,7 @@ python3 create_jira_ticket.py \
 ### Dry Run (Preview)
 
 ```bash
-python3 create_jira_ticket.py \
+./create-jira-ticket \
     --summary "Test ticket" \
     --description "Testing" \
     --dry-run
@@ -89,5 +89,15 @@ Get your team ID from your team's Atlassian URL:
    https://home.atlassian.com/.../people/team/YOUR-TEAM-ID?...
    ```
 3. Use that UUID as the `team` value in your config
+
+## Building
+
+```bash
+# Build the binary
+make
+
+# Clean build artifacts
+make clean
+```
 
 See **JIRA_TICKET_CREATION.md** for complete documentation.

@@ -116,15 +116,15 @@ JIRA ticket creation tools are in the `jira/` directory:
 ```bash
 cd jira
 
-# Install dependencies
-pip3 install -r ../requirements.txt
+# Build the tool
+make
 
 # Configure your fields
 cp jira_fields_config.json.example jira_fields_config.json
 # Edit jira_fields_config.json
 
 # Create a ticket
-python3 create_jira_ticket.py \
+./create-jira-ticket \
     --summary "Bump frontend hashes" \
     --description "Update production hashes for Q2 release"
 ```
