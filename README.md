@@ -31,6 +31,12 @@ Use arrow keys to navigate, press **enter** to bump a project, press **q** to qu
 Set these in `.env` (copy from `.env.example`):
 
 ```bash
+# JIRA — required for automatic ticket creation
+# Generate at: https://id.atlassian.com/manage-profile/security/api-tokens
+JIRA_URL=https://redhat.atlassian.net
+JIRA_USERNAME=your-email@redhat.com
+JIRA_API_TOKEN=your-jira-api-token
+
 # GitHub — optional, but recommended to avoid low unauthenticated rate limits
 # Generate at: https://github.com/settings/tokens (select scope: public_repo)
 GITHUB_TOKEN=ghp_your_token_here
@@ -44,6 +50,18 @@ APP_INTERFACE_FORK_PROJECT=your-username/app-interface
 APP_INTERFACE_UPSTREAM_PROJECT=service/app-interface
 APP_INTERFACE_TARGET_BRANCH=master
 ```
+
+### Setting up JIRA credentials
+
+1. **Create an API token** at https://id.atlassian.com/manage-profile/security/api-tokens
+   - Click "Create API token"
+   - Give it a name (e.g., "bump-brat")
+   - Copy the token
+
+2. **Add to `.env`** file:
+   - `JIRA_URL` (e.g., https://redhat.atlassian.net)
+   - `JIRA_USERNAME` (your email)
+   - `JIRA_API_TOKEN` (the token you just created)
 
 ### Setting up GitHub token
 
@@ -85,6 +103,7 @@ The tool now performs the full workflow for you:
 2. Update refs in the deployment file
 3. Commit and push a generated bump branch
 4. Open a GitLab merge request targeting upstream
+5. Create a JIRA ticket with the changelog and MR link
 
 Example output:
 ```
@@ -93,6 +112,12 @@ Example output:
 Project: service/app-interface
 Branch:  bump/landing-page-frontend-def5678-1713888800
 MR URL:  https://gitlab.com/service/app-interface/-/merge_requests/1234
+--------------------------------------------------------------------------------
+
+🎫 JIRA TICKET CREATED
+--------------------------------------------------------------------------------
+Issue Key: RHCLOUD-12345
+JIRA URL:  https://redhat.atlassian.net/browse/RHCLOUD-12345
 --------------------------------------------------------------------------------
 ```
 
@@ -109,27 +134,31 @@ projects:
     repo_url: https://github.com/RedHatInsights/your-frontend
 ```
 
-## Creating JIRA Tickets
+## JIRA Configuration
 
-JIRA ticket creation tools are in the `jira/` directory:
+JIRA tickets are automatically created when you bump a project. Configure the JIRA fields in `jira/jira_fields_config.json`:
 
 ```bash
-cd jira
-
-# Build the tool
-make
-
-# Configure your fields
-cp jira_fields_config.json.example jira_fields_config.json
-# Edit jira_fields_config.json
-
-# Create a ticket
-./create-jira-ticket \
-    --summary "Bump frontend hashes" \
-    --description "Update production hashes for Q2 release"
+cp jira/jira_fields_config.json.example jira/jira_fields_config.json
+# Edit jira/jira_fields_config.json with your team's settings
 ```
 
-See `jira/README.md` for quick start and `jira/JIRA_TICKET_CREATION.md` for full documentation.
+Example configuration:
+```json
+{
+  "components": ["Console UI"],
+  "labels": ["platform-experience-ui"],
+  "team_field": "customfield_10001",
+  "team": "cc1c0d99-0567-45c8-bf77-8e6149d7ed83"
+}
+```
+
+The tool automatically creates tickets with:
+- **Summary**: `Bump {project-name} to {short-hash}`
+- **Description**: Changelog with commit links + MR URL
+- **Components, Labels, Team**: From `jira_fields_config.json`
+
+See `jira/README.md` for more details on configuration.
 
 ## Building from Source
 
