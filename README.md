@@ -14,17 +14,38 @@ Bump Brat helps you update frontend project commit references to their latest ve
 ## Quick Start
 
 ```bash
+# 1. Clone this repo
 cd bump-tool
+
+# 2. Set up your credentials (see Authentication below)
+cp .env.example .env  # then edit with your values
+
+# 3. Run the tool
 ./bump-brat
 ```
 
 Use arrow keys to navigate, press **enter** to bump a project, press **q** to quit.
 
-## GitHub Authentication (Recommended)
+## Authentication
 
-Without authentication, you're limited to 60 GitHub API requests per hour. With a token, you get 5,000 requests per hour.
+The tool needs credentials for several services. Set these in `.env` (copy from `.env.example` or create manually):
 
-### One-Time Setup
+```bash
+# Jira — required for fetching commit metadata
+# Generate your API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+JIRA_URL=https://redhat.atlassian.net
+JIRA_USERNAME=your-email@redhat.com
+JIRA_API_TOKEN=your-jira-api-token
+
+# Generate at: https://github.com/settings/tokens (select scope: public_repo)
+GITHUB_TOKEN=ghp_your_token_here
+
+# GitLab — only needed for GitLab-hosted repositories
+# Generate at: https://gitlab.com/-/user_settings/personal_access_tokens (select scope: read_api)
+GITLAB_TOKEN=glpat-your_token_here
+```
+
+### Setting up GitHub token
 
 1. **Create a token** at https://github.com/settings/tokens
    - Click "Generate new token (classic)"
@@ -32,21 +53,27 @@ Without authentication, you're limited to 60 GitHub API requests per hour. With 
    - Select scope: `public_repo`
    - Generate and copy the token
 
-2. **Add to your shell config** (`~/.zshrc` or `~/.bashrc`):
-   ```bash
-   export GITHUB_TOKEN="ghp_your_token_here"
-   ```
+2. **Add to `.env`** file in the bump-tool directory
 
-3. **Reload your shell**:
-   ```bash
-   source ~/.zshrc
-   ```
+### Setting up Jira token
 
-### One-Off Usage
+1. **Create an API token** at https://id.atlassian.com/manage-profile/security/api-tokens
+   - Click "Create API token"
+   - Give it a label (e.g., "bump-brat")
+   - Copy the token
 
-```bash
-GITHUB_TOKEN="ghp_your_token_here" ./bump-brat
-```
+2. **Add to `.env`** file with your Jira username (email)
+
+### Setting up GitLab token (optional)
+
+Only needed if you're bumping projects hosted on GitLab:
+
+1. **Create a personal access token** at your GitLab instance
+   - Navigate to User Settings → Access Tokens
+   - Select scope: `read_api`
+   - Generate and copy the token
+
+2. **Add to `.env`** file
 
 ## Controls
 
