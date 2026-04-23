@@ -1,44 +1,32 @@
 # Frontend projects configuration for bump-brat tool
 #
 # To add a new project:
-# 1. Find the deployment file in data/services/
-# 2. Search for prod-frontends and prod-multicluster-frontends namespaces
-# 3. Note the line numbers of the 'ref:' lines with commit hashes (not 'master' or 'internal')
-# 4. Add entry below with name, file_path, repo_url, and both line numbers
+# 1. Find the deployment file in app-interface/data/services/
+# 2. Ensure the frontend appears as `name: <project-name>` in that YAML
+# 3. Add entry below with name, file_path, and repo_url
+#    file_path should be relative to app-interface root (../ prefix is also accepted)
 
 projects:
   - name: access-requests-frontend
     file_path: ../data/services/insights/frontend-base/deploy.yml
     repo_url: https://github.com/RedHatInsights/access-requests-frontend
-    line1: 562
-    line2: 568
 
   - name: insights-rbac-ui
     file_path: ../data/services/insights/rbac/deploy-clowder.yml
     repo_url: https://github.com/RedHatInsights/insights-rbac-ui
-    line1: 81
-    line2: 87
 
   - name: landing-page-frontend
     file_path: ../data/services/insights/frontend-base/deploy.yml
     repo_url: https://github.com/RedHatInsights/landing-page-frontend
-    line1: 161
-    line2: 167
 
   - name: notifications-frontend
     file_path: ../data/services/insights/notifications/deploy-clowder.yml
     repo_url: https://github.com/RedHatInsights/notifications-frontend
-    line1: 1192
-    line2: 1198
 
   - name: sources-ui
     file_path: ../data/services/insights/sources/deploy-clowder.yml
     repo_url: https://github.com/RedHatInsights/sources-ui
-    line1: 252
-    line2: 258
 
   - name: user-preferences-frontend
     file_path: ../data/services/insights/notifications/deploy-clowder.yml
     repo_url: https://github.com/RedHatInsights/user-preferences-frontend
-    line1: 1239
-    line2: 1245

@@ -14,3 +14,7 @@ coverage.out
 
 # Local binaries
 /bump-brat
+/bump-frontend
+
+# Local environment variables
+.env

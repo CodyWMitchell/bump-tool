@@ -1,14 +1,23 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,13 +33,25 @@ const (
 
 // UI Styles using our lime-green and magenta color scheme
 var (
-	titleStyle    = lipgloss.NewStyle().MarginLeft(2).Bold(true).Foreground(lipgloss.Color(colorMagenta))
-	upToDateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
-	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
-	magentaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
-	greenStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
-	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen))
+	titleStyle         = lipgloss.NewStyle().MarginLeft(2).Bold(true).Foreground(lipgloss.Color(colorMagenta))
+	upToDateStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
+	updateStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
+	errorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
+	magentaStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta)).Bold(true)
+	greenStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
+	helpStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen))
+	sectionStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colorMagenta)).MarginTop(1)
+	stepStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
+	okStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true)
+	progressFillStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen))
+	progressEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMagenta))
+	mrBoxStyle         = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color(colorMagenta)).
+				Padding(0, 1).
+				MarginTop(1)
+	shaPattern     = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	percentPattern = regexp.MustCompile(`(\d{1,3})%`)
 )
 
 // Configuration structures
@@ -42,8 +63,6 @@ type projectConfig struct {
 	Name     string `yaml:"name"`
 	FilePath string `yaml:"file_path"`
 	RepoURL  string `yaml:"repo_url"`
-	Line1    int    `yaml:"line1"`
-	Line2    int    `yaml:"line2"`
 }
 
 func loadConfig() (config, error) {
@@ -76,15 +95,15 @@ func (c commit) Description() string { return "" }
 func (c commit) FilterValue() string { return c.message }
 
 type project struct {
-	name        string
-	filePath    string
-	repoURL     string
-	line1       int
-	line2       int
-	currentRef  string
-	latestRef   string
-	commitCount int
-	commits     []commit
+	name                 string
+	filePath             string
+	repoURL              string
+	currentRef           string
+	latestRef            string
+	commitCount          int
+	commits              []commit
+	commitLogUnavailable bool
+	commitLogWarning     string
 }
 
 func (p project) needsUpdate() bool {
@@ -103,10 +122,12 @@ func (p project) Title() string {
 				commitText = "commits"
 			}
 			commitInfo = fmt.Sprintf(" (%d %s)", p.commitCount, commitText)
+		} else if p.commitLogUnavailable {
+			commitInfo = " (commit list unavailable)"
 		}
-		status = updateStyle.Render(fmt.Sprintf("→ %s → %s%s", p.currentRef[:7], p.latestRef[:7], commitInfo))
+		status = updateStyle.Render(fmt.Sprintf("→ %s → %s%s", shortSHA(p.currentRef), shortSHA(p.latestRef), commitInfo))
 	} else {
-		status = upToDateStyle.Render(fmt.Sprintf("✓ up to date (%s)", p.currentRef[:7]))
+		status = upToDateStyle.Render(fmt.Sprintf("✓ up to date (%s)", shortSHA(p.currentRef)))
 	}
 
 	return fmt.Sprintf("%s %s", p.name, status)
@@ -124,16 +145,24 @@ const (
 )
 
 type model struct {
-	list           list.Model
-	commitList     list.Model
-	projects       []project
-	loading        bool
-	err            error
-	quitting       bool
-	ready          bool
-	mode           viewMode
-	detailProject  *project
+	list            list.Model
+	commitList      list.Model
+	projects        []project
+	loading         bool
+	err             error
+	quitting        bool
+	ready           bool
+	mode            viewMode
+	detailProject   *project
 	selectedProject *project
+}
+
+type gitLabSettings struct {
+	baseURL         string
+	token           string
+	forkProject     string
+	upstreamProject string
+	targetBranch    string
 }
 
 type projectsLoadedMsg struct {
@@ -153,8 +182,6 @@ func initialModel() (model, error) {
 			name:     p.Name,
 			filePath: p.FilePath,
 			repoURL:  p.RepoURL,
-			line1:    p.Line1,
-			line2:    p.Line2,
 		}
 	}
 
@@ -183,9 +210,19 @@ func initialModel() (model, error) {
 
 func loadProjectStatus(projects []project) tea.Cmd {
 	return func() tea.Msg {
+		settings, err := loadGitLabSettings()
+		if err != nil {
+			return projectsLoadedMsg{err: err}
+		}
+
+		upstreamProjectID, err := getGitLabProjectID(settings, settings.upstreamProject)
+		if err != nil {
+			return projectsLoadedMsg{err: fmt.Errorf("failed to resolve upstream app-interface project: %w", err)}
+		}
+
 		for i := range projects {
-			// Get current ref
-			currentRef, err := getCurrentRef(projects[i].filePath, projects[i].line1)
+			// Get current deployed ref from upstream app-interface.
+			currentRef, err := getCurrentRefFromGitLab(settings, upstreamProjectID, projects[i].filePath, projects[i].name, projects[i].repoURL)
 			if err != nil {
 				return projectsLoadedMsg{err: fmt.Errorf("%s: failed to get current ref: %w", projects[i].name, err)}
 			}
@@ -202,7 +239,11 @@ func loadProjectStatus(projects []project) tea.Cmd {
 			if currentRef != latestRef {
 				commits, err := getCommitLog(projects[i].repoURL, currentRef, latestRef)
 				if err != nil {
-					return projectsLoadedMsg{err: fmt.Errorf("%s: failed to get commit log: %w", projects[i].name, err)}
+					projects[i].commitLogUnavailable = true
+					projects[i].commitLogWarning = err.Error()
+					projects[i].commits = nil
+					projects[i].commitCount = 0
+					continue
 				}
 				projects[i].commits = commits
 				projects[i].commitCount = len(commits)
@@ -353,14 +394,21 @@ func (m model) View() string {
 
 // Git and GitHub API functions
 func getCurrentRef(filePath string, lineNum int) (string, error) {
-	cmd := exec.Command("sed", "-n", fmt.Sprintf("%dp", lineNum), filePath)
-	output, err := cmd.Output()
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", err
 	}
 
-	line := strings.TrimSpace(string(output))
+	lines := strings.Split(string(data), "\n")
+	if lineNum < 1 || lineNum > len(lines) {
+		return "", fmt.Errorf("line %d is out of range for %s", lineNum, filePath)
+	}
+
+	line := strings.TrimSpace(lines[lineNum-1])
 	ref := strings.TrimSpace(strings.TrimPrefix(line, "ref:"))
+	if ref == "" {
+		return "", fmt.Errorf("line %d in %s does not contain a ref value", lineNum, filePath)
+	}
 	return ref, nil
 }
 
@@ -376,6 +424,21 @@ func makeGitHubRequest(apiURL string) (*http.Response, error) {
 	}
 
 	return http.DefaultClient.Do(req)
+}
+
+func shortSHA(ref string) string {
+	if len(ref) <= 7 {
+		return ref
+	}
+	return ref[:7]
+}
+
+func normalizeRepoURL(repoURL string) string {
+	return strings.TrimSuffix(strings.TrimSpace(repoURL), ".git")
+}
+
+func githubCommitURL(repoURL, sha string) string {
+	return fmt.Sprintf("%s/commit/%s", normalizeRepoURL(repoURL), sha)
 }
 
 func getLatestCommit(repoURL string) (string, error) {
@@ -422,6 +485,9 @@ func getCommitLog(repoURL, oldRef, newRef string) ([]commit, error) {
 		return nil, err
 	}
 
+	if resp.StatusCode == 404 {
+		return nil, fmt.Errorf("compare API unavailable for %s...%s", shortSHA(oldRef), shortSHA(newRef))
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, string(body))
 	}
@@ -452,91 +518,662 @@ func getCommitLog(repoURL, oldRef, newRef string) ([]commit, error) {
 }
 
 func updateRef(filePath string, lineNum int, newRef string) error {
-	sedExpr := fmt.Sprintf("%ds/ref: .*/ref: %s/", lineNum, newRef)
-	cmd := exec.Command("sed", "-i", "", sedExpr, filePath)
-	return cmd.Run()
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if lineNum < 1 || lineNum > len(lines) {
+		return fmt.Errorf("line %d is out of range for %s", lineNum, filePath)
+	}
+
+	current := lines[lineNum-1]
+	idx := strings.Index(current, "ref:")
+	if idx == -1 {
+		return fmt.Errorf("line %d in %s does not contain ref:", lineNum, filePath)
+	}
+	lines[lineNum-1] = fmt.Sprintf("%sref: %s", current[:idx], newRef)
+	updated := strings.Join(lines, "\n")
+	return os.WriteFile(filePath, []byte(updated), 0o644)
+}
+
+func loadGitLabSettings() (gitLabSettings, error) {
+	baseURL := strings.TrimSuffix(strings.TrimSpace(os.Getenv("GITLAB_BASE_URL")), "/")
+	if baseURL == "" {
+		baseURL = "https://gitlab.com"
+	}
+
+	settings := gitLabSettings{
+		baseURL:         baseURL,
+		token:           strings.TrimSpace(os.Getenv("GITLAB_TOKEN")),
+		forkProject:     strings.TrimSpace(os.Getenv("APP_INTERFACE_FORK_PROJECT")),
+		upstreamProject: strings.TrimSpace(os.Getenv("APP_INTERFACE_UPSTREAM_PROJECT")),
+		targetBranch:    strings.TrimSpace(os.Getenv("APP_INTERFACE_TARGET_BRANCH")),
+	}
+
+	if settings.token == "" {
+		return settings, fmt.Errorf("GITLAB_TOKEN is required")
+	}
+	if settings.forkProject == "" {
+		return settings, fmt.Errorf("APP_INTERFACE_FORK_PROJECT is required")
+	}
+	if settings.upstreamProject == "" {
+		return settings, fmt.Errorf("APP_INTERFACE_UPSTREAM_PROJECT is required")
+	}
+	if settings.targetBranch == "" {
+		settings.targetBranch = "master"
+	}
+
+	return settings, nil
+}
+
+func makeRepoFilePath(repoRoot, configuredPath string) string {
+	return filepath.Join(repoRoot, normalizedProjectFilePath(configuredPath))
+}
+
+func buildGitLabRepoURL(baseURL, projectPath, token string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid GITLAB_BASE_URL: %w", err)
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	parsed.User = url.UserPassword("oauth2", token)
+	return fmt.Sprintf("%s/%s.git", strings.TrimSuffix(parsed.String(), "/"), projectPath), nil
+}
+
+func normalizedProjectFilePath(configuredPath string) string {
+	clean := strings.TrimSpace(configuredPath)
+	for strings.HasPrefix(clean, "../") {
+		clean = strings.TrimPrefix(clean, "../")
+	}
+	return strings.TrimPrefix(clean, "./")
+}
+
+func mappingValueByKey(node *yaml.Node, keyName string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		key := node.Content[i]
+		value := node.Content[i+1]
+		if key.Kind == yaml.ScalarNode && key.Value == keyName {
+			return value
+		}
+	}
+	return nil
+}
+
+func scalarValue(node *yaml.Node) string {
+	if node == nil || node.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return strings.TrimSpace(node.Value)
+}
+
+func isProductionNamespaceRef(namespaceRef string) bool {
+	ref := strings.ToLower(strings.TrimSpace(namespaceRef))
+	if ref == "" {
+		return false
+	}
+	return strings.Contains(ref, "prod") && !strings.Contains(ref, "stage") && !strings.Contains(ref, "ephemeral")
+}
+
+func collectRefsFromTargets(targets *yaml.Node, refs *[]string, lines *[]int, seen map[int]bool) {
+	if targets == nil || targets.Kind != yaml.SequenceNode {
+		return
+	}
+
+	for _, targetItem := range targets.Content {
+		if targetItem.Kind != yaml.MappingNode {
+			continue
+		}
+		namespaceNode := mappingValueByKey(targetItem, "namespace")
+		refNode := mappingValueByKey(targetItem, "ref")
+		namespaceRef := scalarValue(mappingValueByKey(namespaceNode, "$ref"))
+		refValue := scalarValue(refNode)
+
+		if !isProductionNamespaceRef(namespaceRef) || !shaPattern.MatchString(refValue) || refNode == nil {
+			continue
+		}
+		if seen[refNode.Line] {
+			continue
+		}
+
+		*refs = append(*refs, refValue)
+		*lines = append(*lines, refNode.Line)
+		seen[refNode.Line] = true
+	}
+}
+
+func collectProjectRefsAndLines(node *yaml.Node, projectName, repoURL string, refs *[]string, lines *[]int, seen map[int]bool) {
+	if node == nil {
+		return
+	}
+
+	if node.Kind == yaml.MappingNode {
+		name := scalarValue(mappingValueByKey(node, "name"))
+		url := scalarValue(mappingValueByKey(node, "url"))
+		matchedByURL := repoURL != "" && strings.EqualFold(strings.TrimSpace(url), strings.TrimSpace(repoURL))
+		matchedByName := projectName != "" && strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(projectName))
+		if matchedByURL || matchedByName {
+			collectRefsFromTargets(mappingValueByKey(node, "targets"), refs, lines, seen)
+		}
+	}
+
+	for _, child := range node.Content {
+		collectProjectRefsAndLines(child, projectName, repoURL, refs, lines, seen)
+	}
+}
+
+func getProjectRefsAndLines(raw, projectName, repoURL string) ([]string, []int, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &root); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse deployment YAML: %w", err)
+	}
+
+	refs := make([]string, 0, 2)
+	lines := make([]int, 0, 2)
+	seen := map[int]bool{}
+	collectProjectRefsAndLines(&root, projectName, repoURL, &refs, &lines, seen)
+
+	if len(refs) == 0 {
+		if repoURL != "" {
+			return nil, nil, fmt.Errorf("no production ref entries found for project %q with repo %q", projectName, repoURL)
+		}
+		return nil, nil, fmt.Errorf("no production ref entries found for project %q", projectName)
+	}
+
+	return refs, lines, nil
+}
+
+func getCurrentRefFromGitLab(settings gitLabSettings, projectID int, configuredFilePath, projectName, repoURL string) (string, error) {
+	filePath := normalizedProjectFilePath(configuredFilePath)
+	escapedPath := url.PathEscape(filePath)
+	refQuery := url.QueryEscape(settings.targetBranch)
+	endpoint := fmt.Sprintf("/projects/%d/repository/files/%s?ref=%s", projectID, escapedPath, refQuery)
+
+	body, err := gitLabAPIRequest(settings, "GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+
+	var fileResp struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(body, &fileResp); err != nil {
+		return "", err
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(fileResp.Content, "\n", ""))
+	if err != nil {
+		return "", fmt.Errorf("failed to decode file content for %s: %w", filePath, err)
+	}
+
+	refs, _, err := getProjectRefsAndLines(string(decoded), projectName, repoURL)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", filePath, err)
+	}
+
+	// Frontend refs are expected to be duplicated for prod namespaces; first one is enough for compare.
+	return refs[0], nil
+}
+
+func updateProjectRefsInFile(filePath, projectName, repoURL, newRef string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	_, lines, err := getProjectRefsAndLines(string(data), projectName, repoURL)
+	if err != nil {
+		return err
+	}
+
+	for _, lineNum := range lines {
+		if err := updateRef(filePath, lineNum, newRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runGitWithLiveProgress(repoDir, step string, args ...string) error {
+	fmt.Printf("   %s %s...\n", stepStyle.Render("→"), stepStyle.Render(step))
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoDir
+	cmd.Stdout = os.Stdout
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to open git stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start git command: %w", err)
+	}
+
+	showedProgress := false
+	scanner := bufio.NewScanner(stderrPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(splitCRLF)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		phase, percent, ok := parseGitProgress(line)
+		if ok {
+			showedProgress = true
+			bar := renderProgressBar(percent, 26)
+			fmt.Printf("\r     %s %3d%% %s", bar, percent, helpStyle.Render(phase))
+			continue
+		}
+
+		if showedProgress {
+			fmt.Print("\n")
+			showedProgress = false
+		}
+		fmt.Printf("     %s\n", line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed reading git progress output: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("git %s failed: %w", strings.Join(args, " "), err)
+	}
+	if showedProgress {
+		fmt.Print("\n")
+	}
+	fmt.Printf("   %s %s\n", okStyle.Render("✓"), okStyle.Render(step))
+	return nil
+}
+
+func splitCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	for i, b := range data {
+		if b == '\n' || b == '\r' {
+			return i + 1, bytes.TrimSpace(data[:i]), nil
+		}
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), bytes.TrimSpace(data), nil
+	}
+	return 0, nil, nil
+}
+
+func parseGitProgress(line string) (string, int, bool) {
+	match := percentPattern.FindStringSubmatch(line)
+	if len(match) < 2 {
+		return "", 0, false
+	}
+	percent, err := strconv.Atoi(match[1])
+	if err != nil {
+		return "", 0, false
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	lower := strings.ToLower(line)
+	switch {
+	case strings.Contains(lower, "receiving objects"):
+		return "receiving objects", percent, true
+	case strings.Contains(lower, "counting objects"):
+		return "counting objects", percent, true
+	case strings.Contains(lower, "compressing objects"):
+		return "compressing objects", percent, true
+	case strings.Contains(lower, "resolving deltas"):
+		return "resolving deltas", percent, true
+	case strings.Contains(lower, "writing objects"):
+		return "writing objects", percent, true
+	default:
+		return "git progress", percent, true
+	}
+}
+
+func renderProgressBar(percent, width int) string {
+	if width <= 0 {
+		width = 20
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	filled := (percent * width) / 100
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+	fill := progressFillStyle.Render(strings.Repeat("█", filled))
+	rest := progressEmptyStyle.Render(strings.Repeat("░", empty))
+	return "[" + fill + rest + "]"
+}
+
+func gitLabAPIRequest(settings gitLabSettings, method, path string, body any) ([]byte, error) {
+	url := fmt.Sprintf("%s/api/v4%s", settings.baseURL, path)
+
+	var payload io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = bytes.NewBuffer(raw)
+	}
+
+	req, err := http.NewRequest(method, url, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("PRIVATE-TOKEN", settings.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &gitLabAPIError{
+			Method:     method,
+			Path:       path,
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+		}
+	}
+	return respBody, nil
+}
+
+type gitLabAPIError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *gitLabAPIError) Error() string {
+	return fmt.Sprintf("GitLab API %s %s failed with status %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+func isGitLabStatusError(err error, status int) bool {
+	var apiErr *gitLabAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == status
+}
+
+func getGitLabProjectID(settings gitLabSettings, projectPath string) (int, error) {
+	encoded := url.PathEscape(projectPath)
+	body, err := gitLabAPIRequest(settings, "GET", fmt.Sprintf("/projects/%s", encoded), nil)
+	if err != nil {
+		return 0, err
+	}
+	var project struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(body, &project); err != nil {
+		return 0, err
+	}
+	return project.ID, nil
+}
+
+func createGitLabMR(settings gitLabSettings, upstreamID, forkID int, sourceBranch, title, description string) (string, error) {
+	upstreamPayload := map[string]any{
+		"source_branch":        sourceBranch,
+		"target_branch":        settings.targetBranch,
+		"source_project_id":    forkID,
+		"title":                title,
+		"description":          description,
+		"remove_source_branch": true,
+	}
+
+	body, err := gitLabAPIRequest(settings, "POST", fmt.Sprintf("/projects/%d/merge_requests", upstreamID), upstreamPayload)
+	if err != nil && (isGitLabStatusError(err, 403) || isGitLabStatusError(err, 404)) {
+		// Some GitLab instances require creating the MR from the fork project endpoint.
+		forkPayload := map[string]any{
+			"source_branch":        sourceBranch,
+			"target_branch":        settings.targetBranch,
+			"target_project_id":    upstreamID,
+			"title":                title,
+			"description":          description,
+			"remove_source_branch": true,
+		}
+		body, err = gitLabAPIRequest(settings, "POST", fmt.Sprintf("/projects/%d/merge_requests", forkID), forkPayload)
+	}
+	if err != nil {
+		if isGitLabStatusError(err, 403) {
+			return "", fmt.Errorf("%w (ensure token has api scope and your user can create merge requests in %s)", err, settings.upstreamProject)
+		}
+		return "", err
+	}
+
+	var mr struct {
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(body, &mr); err != nil {
+		return "", err
+	}
+	if mr.WebURL == "" {
+		return "", fmt.Errorf("GitLab API did not return merge request URL")
+	}
+	return mr.WebURL, nil
+}
+
+func loadDotEnv(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if key == "" {
+			continue
+		}
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
+		// Keep already exported values, but populate from .env when missing.
+		if os.Getenv(key) == "" {
+			if err := os.Setenv(key, value); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // Project processing and output
 func processProject(p project) error {
-	fmt.Println("\n" + magentaStyle.Render("Processing project...") + "\n")
+	settings, err := loadGitLabSettings()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println(sectionStyle.Render("Processing project"))
+	fmt.Println()
 
 	fmt.Printf("📦 %s\n", magentaStyle.Render(p.name))
-	fmt.Printf("   Current: %s\n", updateStyle.Render(p.currentRef[:7]))
-	fmt.Printf("   Latest:  %s\n", greenStyle.Render(p.latestRef[:7]))
+	fmt.Printf("   Current: %s\n", updateStyle.Render(shortSHA(p.currentRef)))
+	fmt.Printf("   Latest:  %s\n", greenStyle.Render(shortSHA(p.latestRef)))
 
 	// Use already fetched commits
 	commits := p.commits
-	if len(commits) == 0 {
+	if len(commits) == 0 && !p.commitLogUnavailable {
 		// Fetch if not already loaded
-		var err error
 		commits, err = getCommitLog(p.repoURL, p.currentRef, p.latestRef)
 		if err != nil {
-			return fmt.Errorf("failed to get commit log for %s: %w", p.name, err)
+			p.commitLogUnavailable = true
+			p.commitLogWarning = err.Error()
+			commits = nil
 		}
 	}
 
-	fmt.Println("   Commits:")
-	for _, c := range commits {
-		fmt.Printf("     - %s (%s)\n", c.message, c.sha[:7])
+	if len(commits) > 0 {
+		fmt.Println("   Commits:")
+		for _, c := range commits {
+			fmt.Printf("     - %s (%s)\n", c.message, shortSHA(c.sha))
+		}
+	} else if p.commitLogUnavailable {
+		fmt.Printf("   %s %s\n", updateStyle.Render("Warning:"), p.commitLogWarning)
 	}
 
-	// Update refs
-	if err := updateRef(p.filePath, p.line1, p.latestRef); err != nil {
-		return fmt.Errorf("failed to update ref in %s: %w", p.filePath, err)
-	}
-	if err := updateRef(p.filePath, p.line2, p.latestRef); err != nil {
-		return fmt.Errorf("failed to update ref in %s: %w", p.filePath, err)
-	}
-
-	fmt.Printf("   %s\n\n", upToDateStyle.Render("✓ Updated"))
-
-	// Stage file
-	fmt.Println(magentaStyle.Render("Staging changes..."))
-	cmd := exec.Command("git", "add", p.filePath)
-	output, err := cmd.CombinedOutput()
+	repoDir, err := os.MkdirTemp("", "bump-brat-app-interface-*")
 	if err != nil {
-		return fmt.Errorf("failed to stage file: %w\nOutput: %s", err, string(output))
+		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	fmt.Printf("   %s\n\n", upToDateStyle.Render("✓ Changes staged"))
+	defer os.RemoveAll(repoDir)
 
-	// Create commit message
-	commitMsg := fmt.Sprintf("%s: bump to %s", p.name, p.latestRef[:7])
+	forkRepoURL, err := buildGitLabRepoURL(settings.baseURL, settings.forkProject, settings.token)
+	if err != nil {
+		return err
+	}
+	upstreamRepoURL, err := buildGitLabRepoURL(settings.baseURL, settings.upstreamProject, settings.token)
+	if err != nil {
+		return err
+	}
 
-	// Build MR body
-	mrBody := fmt.Sprintf("Bumps %s from %s to %s\n\n", p.name, p.currentRef[:7], p.latestRef[:7])
+	fmt.Println(sectionStyle.Render("Syncing app-interface fork with upstream"))
+	if err := runGitWithLiveProgress("", "cloning fork", "clone", "--progress", forkRepoURL, repoDir); err != nil {
+		return err
+	}
+	if err := runGitWithLiveProgress(repoDir, "adding upstream remote", "remote", "add", "upstream", upstreamRepoURL); err != nil {
+		return err
+	}
+	if err := runGitWithLiveProgress(repoDir, "fetching upstream branch", "fetch", "--progress", "upstream", settings.targetBranch); err != nil {
+		return err
+	}
+	if err := runGitWithLiveProgress(repoDir, "checking out synced base branch", "checkout", "-B", settings.targetBranch, fmt.Sprintf("upstream/%s", settings.targetBranch)); err != nil {
+		return err
+	}
+
+	branchName := fmt.Sprintf("bump/%s-%s-%d", p.name, shortSHA(p.latestRef), time.Now().Unix())
+	if err := runGitWithLiveProgress(repoDir, "creating bump branch", "checkout", "-b", branchName); err != nil {
+		return err
+	}
+
+	repoFilePath := makeRepoFilePath(repoDir, p.filePath)
+	if _, err := os.Stat(repoFilePath); err != nil {
+		return fmt.Errorf("deployment file not found in cloned app-interface repo: %s", repoFilePath)
+	}
+
+	// Update all matching refs for this frontend by name in cloned app-interface checkout.
+	if err := updateProjectRefsInFile(repoFilePath, p.name, p.repoURL, p.latestRef); err != nil {
+		return fmt.Errorf("failed to update ref in %s: %w", repoFilePath, err)
+	}
+
+	fmt.Printf("   %s\n\n", okStyle.Render("✓ Updated refs"))
+
+	// Stage file in cloned app-interface repo.
+	fmt.Println(sectionStyle.Render("Staging and committing changes"))
+	if err := runGitWithLiveProgress(repoDir, "staging deployment changes", "add", repoFilePath); err != nil {
+		return err
+	}
+	if err := runGitWithLiveProgress(repoDir, "creating commit",
+		"-c", "user.name=bump-brat",
+		"-c", "user.email=bump-brat@local",
+		"commit", "-m", fmt.Sprintf("%s: bump to %s", p.name, shortSHA(p.latestRef)),
+	); err != nil {
+		return err
+	}
+	if err := runGitWithLiveProgress(repoDir, "pushing branch to fork", "push", "--progress", "-u", "origin", branchName); err != nil {
+		return err
+	}
+	fmt.Printf("   %s\n\n", okStyle.Render("✓ Branch pushed"))
+
+	title := fmt.Sprintf("%s: bump to %s", p.name, shortSHA(p.latestRef))
+	oldHashLink := fmt.Sprintf("[%s](%s)", shortSHA(p.currentRef), githubCommitURL(p.repoURL, p.currentRef))
+	newHashLink := fmt.Sprintf("[%s](%s)", shortSHA(p.latestRef), githubCommitURL(p.repoURL, p.latestRef))
+	description := fmt.Sprintf("Bumps %s from %s to %s\n\n", p.name, oldHashLink, newHashLink)
 	for _, c := range commits {
-		mrBody += fmt.Sprintf("- %s (%s)\n", c.message, c.sha[:7])
+		commitLink := fmt.Sprintf("[%s](%s)", shortSHA(c.sha), githubCommitURL(c.repoURL, c.sha))
+		description += fmt.Sprintf("- %s (%s)\n", c.message, commitLink)
 	}
-	mrBody += "\n---\n🤖 Generated by bump-brat"
+	if p.commitLogUnavailable {
+		description += fmt.Sprintf("- Commit list unavailable: %s\n", p.commitLogWarning)
+	}
+	description += "\n---\n🤖 Generated by bump-brat"
 
-	// Display commit message and MR body
-	fmt.Println(strings.Repeat("=", 80))
-	fmt.Println(magentaStyle.Render("\n📋 COMMIT MESSAGE"))
-	fmt.Println(helpStyle.Render("Copy and use with: git commit -m \"...\""))
-	fmt.Println(strings.Repeat("-", 80))
-	fmt.Println(commitMsg)
-	fmt.Println(strings.Repeat("-", 80))
+	upstreamID, err := getGitLabProjectID(settings, settings.upstreamProject)
+	if err != nil {
+		return err
+	}
+	forkID, err := getGitLabProjectID(settings, settings.forkProject)
+	if err != nil {
+		return err
+	}
+	mrURL, err := createGitLabMR(settings, upstreamID, forkID, branchName, title, description)
+	if err != nil {
+		return err
+	}
 
-	fmt.Println(magentaStyle.Render("\n📋 MERGE REQUEST BODY"))
-	fmt.Println(helpStyle.Render("Copy and use when creating your MR"))
-	fmt.Println(strings.Repeat("-", 80))
-	fmt.Println(mrBody)
-	fmt.Println(strings.Repeat("-", 80))
+	mrSummary := strings.Join([]string{
+		magentaStyle.Render("📋 Merge Request Created"),
+		"",
+		fmt.Sprintf("Project: %s", settings.upstreamProject),
+		fmt.Sprintf("Branch:  %s", branchName),
+		fmt.Sprintf("MR URL:  %s", mrURL),
+	}, "\n")
+	fmt.Println(mrBoxStyle.Render(mrSummary))
 
 	fmt.Println(greenStyle.Render("\n✓ Done!"))
-	fmt.Println(helpStyle.Render("Changes have been staged. Review them with 'git diff --staged'"))
+	fmt.Println(helpStyle.Render("Fork synced, branch pushed, and MR opened in GitLab."))
 
 	return nil
 }
 
 func main() {
-	// Check for GitHub authentication
-	if os.Getenv("GITHUB_TOKEN") != "" {
-		fmt.Println(greenStyle.Render("✓ GitHub authentication enabled"))
+	if err := loadDotEnv(".env"); err != nil {
+		fmt.Printf("%s %v\n", errorStyle.Render("Error loading .env:"), err)
+		os.Exit(1)
+	}
+
+	// Check for GitLab authentication and project config.
+	if _, err := loadGitLabSettings(); err == nil {
+		fmt.Println(greenStyle.Render("✓ GitLab automation enabled"))
 	} else {
-		fmt.Println(updateStyle.Render("⚠ No GITHUB_TOKEN set - rate limit: 60 requests/hour"))
-		fmt.Println(helpStyle.Render("  Set GITHUB_TOKEN env var for 5000 requests/hour"))
+		fmt.Println(updateStyle.Render("⚠ GitLab automation config is incomplete"))
+		fmt.Println(helpStyle.Render("  Set GITLAB_TOKEN, APP_INTERFACE_FORK_PROJECT, and APP_INTERFACE_UPSTREAM_PROJECT"))
+		fmt.Printf("  %s\n", helpStyle.Render(err.Error()))
+	}
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		fmt.Println(helpStyle.Render("  Optional: set GITHUB_TOKEN to avoid GitHub API rate limits"))
 	}
 	fmt.Println()
 
