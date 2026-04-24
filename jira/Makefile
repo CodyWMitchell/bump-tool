@@ -2,8 +2,8 @@
 
 all: create-jira-ticket
 
-create-jira-ticket: create-jira-ticket.go
-	go build -o create-jira-ticket create-jira-ticket.go
+create-jira-ticket: create-jira-ticket.go slack.go
+	go build -o create-jira-ticket create-jira-ticket.go slack.go
 
 clean:
 	rm -f create-jira-ticket
