@@ -94,6 +94,16 @@ func (c commit) Title() string {
 func (c commit) Description() string { return "" }
 func (c commit) FilterValue() string { return c.message }
 
+// createdTicket tracks JIRA tickets created during bulk operations
+type createdTicket struct {
+	project   string
+	issueKey  string
+	issueURL  string
+	summary   string
+	mrURL     string
+	succeeded bool
+}
+
 type project struct {
 	name                 string
 	filePath             string
@@ -145,16 +155,18 @@ const (
 )
 
 type model struct {
-	list            list.Model
-	commitList      list.Model
-	projects        []project
-	loading         bool
-	err             error
-	quitting        bool
-	ready           bool
-	mode            viewMode
-	detailProject   *project
-	selectedProject *project
+	list               list.Model
+	commitList         list.Model
+	projects           []project
+	loading            bool
+	err                error
+	quitting           bool
+	ready              bool
+	mode               viewMode
+	detailProject      *project
+	selectedProject    *project
+	bulkJiraRequested  bool
+	outdatedProjects   []project
 }
 
 type gitLabSettings struct {
@@ -316,6 +328,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 
+			case "b":
+				// Create bulk JIRA ticket for all outdated projects
+				outdated := []project{}
+				for _, p := range m.projects {
+					if p.needsUpdate() {
+						outdated = append(outdated, p)
+					}
+				}
+				if len(outdated) > 0 {
+					m.bulkJiraRequested = true
+					m.outdatedProjects = outdated
+					m.quitting = true
+					return m, tea.Quit
+				}
+				return m, nil
+
 			case "d":
 				// Show detail view for current project
 				if i := m.list.Index(); i >= 0 && i < len(m.projects) {
@@ -403,7 +431,7 @@ func (m model) View() string {
 
 	switch m.mode {
 	case viewList:
-		help = helpStyle.Render("\n  d: view details • enter: bump selected project • q: quit")
+		help = helpStyle.Render("\n  d: view details • enter: bump selected project • b: bulk operation (MRs + JIRA) • q: quit")
 		content = m.list.View()
 	case viewDetail:
 		help = helpStyle.Render("\n  enter: open commit on GitHub • esc: back to list • q: quit")
@@ -1321,6 +1349,308 @@ func processProject(p project) error {
 	return nil
 }
 
+func createBulkJiraTicket(projects []project) {
+	fmt.Println()
+	fmt.Println(sectionStyle.Render("Bulk Operation"))
+	fmt.Println()
+
+	if len(projects) == 0 {
+		fmt.Println(errorStyle.Render("No outdated projects found"))
+		return
+	}
+
+	// Ask if user wants to create GitLab MRs
+	fmt.Printf("%s Create GitLab MRs for all projects? (Y/n): ", helpStyle.Render("?"))
+	var response string
+	fmt.Scanln(&response)
+	createMRs := response == "" || strings.ToLower(response) == "y"
+
+	// Load GitLab settings if creating MRs
+	var gitlabSettings gitLabSettings
+	var upstreamID, forkID int
+	if createMRs {
+		var err error
+		gitlabSettings, err = loadGitLabSettings()
+		if err != nil {
+			fmt.Printf("%s %s\n", errorStyle.Render("Error:"), err.Error())
+			fmt.Println(helpStyle.Render("GitLab MR creation disabled"))
+			createMRs = false
+		} else {
+			upstreamID, err = getGitLabProjectID(gitlabSettings, gitlabSettings.upstreamProject)
+			if err != nil {
+				fmt.Printf("%s Failed to resolve upstream project: %v\n", errorStyle.Render("Error:"), err)
+				createMRs = false
+			}
+			forkID, err = getGitLabProjectID(gitlabSettings, gitlabSettings.forkProject)
+			if err != nil {
+				fmt.Printf("%s Failed to resolve fork project: %v\n", errorStyle.Render("Error:"), err)
+				createMRs = false
+			}
+		}
+	}
+
+	// Load JIRA settings
+	jiraSettings, err := loadJiraSettings()
+	if err != nil {
+		fmt.Printf("%s %s\n", errorStyle.Render("Error:"), err.Error())
+		return
+	}
+
+	jiraConfigPath := filepath.Join("jira", "jira_fields_config.json")
+	jiraCfg, err := loadJiraConfig(jiraConfigPath)
+	if err != nil {
+		fmt.Printf("%s %s\n", errorStyle.Render("Error:"), err.Error())
+		return
+	}
+
+	// Track created tickets
+	tickets := make([]createdTicket, 0, len(projects))
+
+	// Clone app-interface repo if creating MRs
+	var repoDir string
+	if createMRs {
+		fmt.Println()
+		fmt.Println(sectionStyle.Render("Setting up app-interface repository"))
+
+		var err error
+		repoDir, err = os.MkdirTemp("", "bump-brat-bulk-*")
+		if err != nil {
+			fmt.Printf("%s Failed to create temp directory: %v\n", errorStyle.Render("Error:"), err)
+			createMRs = false
+		} else {
+			defer os.RemoveAll(repoDir)
+
+			forkRepoURL, err := buildGitLabRepoURL(gitlabSettings.baseURL, gitlabSettings.forkProject, gitlabSettings.token)
+			if err != nil {
+				fmt.Printf("%s %v\n", errorStyle.Render("Error:"), err)
+				createMRs = false
+			}
+			upstreamRepoURL, err := buildGitLabRepoURL(gitlabSettings.baseURL, gitlabSettings.upstreamProject, gitlabSettings.token)
+			if err != nil {
+				fmt.Printf("%s %v\n", errorStyle.Render("Error:"), err)
+				createMRs = false
+			}
+
+			if createMRs {
+				if err := runGitWithLiveProgress("", "cloning fork", "clone", "--progress", forkRepoURL, repoDir); err != nil {
+					fmt.Printf("%s %v\n", errorStyle.Render("Error:"), err)
+					createMRs = false
+				}
+				if err := runGitWithLiveProgress(repoDir, "adding upstream remote", "remote", "add", "upstream", upstreamRepoURL); err != nil {
+					fmt.Printf("%s %v\n", errorStyle.Render("Error:"), err)
+					createMRs = false
+				}
+				if err := runGitWithLiveProgress(repoDir, "fetching upstream branch", "fetch", "--progress", "upstream", gitlabSettings.targetBranch); err != nil {
+					fmt.Printf("%s %v\n", errorStyle.Render("Error:"), err)
+					createMRs = false
+				}
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(sectionStyle.Render("Processing Projects"))
+
+	// Process each project
+	for i, p := range projects {
+		fmt.Printf("\n   %s [%d/%d] %s\n",
+			stepStyle.Render("→"), i+1, len(projects), magentaStyle.Render(p.name))
+
+		var mrURL string
+
+		// Create GitLab MR if requested
+		if createMRs {
+			fmt.Printf("       %s Creating MR...\n", stepStyle.Render("→"))
+
+			// Checkout synced base branch
+			if err := runGitWithLiveProgress(repoDir, "syncing base branch", "checkout", "-B", gitlabSettings.targetBranch, fmt.Sprintf("upstream/%s", gitlabSettings.targetBranch)); err != nil {
+				fmt.Printf("       %s Failed to sync branch: %v\n", errorStyle.Render("✗"), err)
+			} else {
+				branchName := fmt.Sprintf("bump/%s-%s-%d", p.name, shortSHA(p.latestRef), time.Now().Unix())
+				if err := runGitWithLiveProgress(repoDir, "creating bump branch", "checkout", "-b", branchName); err != nil {
+					fmt.Printf("       %s Failed to create branch: %v\n", errorStyle.Render("✗"), err)
+				} else {
+					repoFilePath := makeRepoFilePath(repoDir, p.filePath)
+					if err := updateProjectRefsInFile(repoFilePath, p.name, p.repoURL, p.latestRef); err != nil {
+						fmt.Printf("       %s Failed to update refs: %v\n", errorStyle.Render("✗"), err)
+					} else {
+						if err := runGitWithLiveProgress(repoDir, "staging changes", "add", repoFilePath); err != nil {
+							fmt.Printf("       %s Failed to stage: %v\n", errorStyle.Render("✗"), err)
+						} else {
+							if err := runGitWithLiveProgress(repoDir, "committing",
+								"-c", "user.name=bump-brat",
+								"-c", "user.email=bump-brat@local",
+								"commit", "-m", fmt.Sprintf("%s: bump to %s", p.name, shortSHA(p.latestRef)),
+							); err != nil {
+								fmt.Printf("       %s Failed to commit: %v\n", errorStyle.Render("✗"), err)
+							} else {
+								if err := runGitWithLiveProgress(repoDir, "pushing branch", "push", "--progress", "-u", "origin", branchName); err != nil {
+									fmt.Printf("       %s Failed to push: %v\n", errorStyle.Render("✗"), err)
+								} else {
+									// Create MR
+									title := fmt.Sprintf("%s: bump to %s", p.name, shortSHA(p.latestRef))
+									oldHashLinkMD := fmt.Sprintf("[%s](%s)", shortSHA(p.currentRef), githubCommitURL(p.repoURL, p.currentRef))
+									newHashLinkMD := fmt.Sprintf("[%s](%s)", shortSHA(p.latestRef), githubCommitURL(p.repoURL, p.latestRef))
+									mrDescription := fmt.Sprintf("Bumps %s from %s to %s\n\n", p.name, oldHashLinkMD, newHashLinkMD)
+									for _, c := range p.commits {
+										commitLink := fmt.Sprintf("[%s](%s)", shortSHA(c.sha), githubCommitURL(c.repoURL, c.sha))
+										mrDescription += fmt.Sprintf("- %s (%s)\n", c.message, commitLink)
+									}
+									if p.commitLogUnavailable {
+										mrDescription += fmt.Sprintf("- Commit list unavailable: %s\n", p.commitLogWarning)
+									}
+									mrDescription += "\n---\n🤖 Generated by bump-brat"
+
+									var err error
+									mrURL, err = createGitLabMR(gitlabSettings, upstreamID, forkID, branchName, title, mrDescription)
+									if err != nil {
+										fmt.Printf("       %s Failed to create MR: %v\n", errorStyle.Render("✗"), err)
+									} else {
+										fmt.Printf("       %s MR: %s\n", okStyle.Render("✓"), mrURL)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Create JIRA ticket
+		fmt.Printf("       %s Creating JIRA ticket...\n", stepStyle.Render("→"))
+
+		oldHashLink := fmt.Sprintf("[%s|%s]", shortSHA(p.currentRef), githubCommitURL(p.repoURL, p.currentRef))
+		newHashLink := fmt.Sprintf("[%s|%s]", shortSHA(p.latestRef), githubCommitURL(p.repoURL, p.latestRef))
+
+		// Build description with MR link if available
+		description := ""
+		if mrURL != "" {
+			description = fmt.Sprintf("GitLab MR: %s\n\n", mrURL)
+		}
+		description += fmt.Sprintf("Bumps %s from %s to %s\n\n", p.name, oldHashLink, newHashLink)
+		description += "Changelog:\n\n"
+		for _, c := range p.commits {
+			commitLink := fmt.Sprintf("[%s|%s]", shortSHA(c.sha), githubCommitURL(c.repoURL, c.sha))
+			description += fmt.Sprintf("* %s %s\n", c.message, commitLink)
+		}
+		if p.commitLogUnavailable {
+			description += fmt.Sprintf("\n_Commit list unavailable: %s_\n", p.commitLogWarning)
+		}
+		description += "\n----\n🤖 Generated by bump-brat"
+
+		summary := fmt.Sprintf("Bump %s to %s", p.name, shortSHA(p.latestRef))
+		payload := buildJiraPayload(summary, description, jiraCfg)
+
+		issueKey, err := createJiraTicket(jiraSettings, payload)
+		if err != nil {
+			fmt.Printf("       %s Failed: %v\n", errorStyle.Render("✗"), err)
+			tickets = append(tickets, createdTicket{
+				project:   p.name,
+				succeeded: false,
+			})
+			continue
+		}
+
+		issueURL := fmt.Sprintf("%s/browse/%s", jiraSettings.url, issueKey)
+		fmt.Printf("       %s JIRA: %s\n", okStyle.Render("✓"), issueURL)
+
+		tickets = append(tickets, createdTicket{
+			project:   p.name,
+			issueKey:  issueKey,
+			issueURL:  issueURL,
+			summary:   summary,
+			mrURL:     mrURL,
+			succeeded: true,
+		})
+	}
+
+	// Post all tickets to Slack as one message
+	slackWebhookURL := os.Getenv("SLACK_WEBHOOK_URL")
+	if slackWebhookURL != "" {
+		fmt.Println()
+		fmt.Printf("%s Posting to Slack...\n", stepStyle.Render("→"))
+
+		successTickets := []createdTicket{}
+		for _, t := range tickets {
+			if t.succeeded {
+				successTickets = append(successTickets, t)
+			}
+		}
+
+		if len(successTickets) > 0 {
+			if err := postBulkTicketsToSlack(slackWebhookURL, successTickets, jiraCfg); err != nil {
+				fmt.Printf("   %s Failed to post to Slack: %v\n", errorStyle.Render("✗"), err)
+			} else {
+				fmt.Printf("   %s Posted %d tickets to Slack\n", okStyle.Render("✓"), len(successTickets))
+			}
+		}
+	}
+
+	fmt.Println()
+	successCount := 0
+	mrCount := 0
+	for _, t := range tickets {
+		if t.succeeded {
+			successCount++
+			if t.mrURL != "" {
+				mrCount++
+			}
+		}
+	}
+	if createMRs {
+		fmt.Println(greenStyle.Render(fmt.Sprintf("✓ Created %d/%d MRs and %d/%d JIRA tickets", mrCount, len(projects), successCount, len(projects))))
+	} else {
+		fmt.Println(greenStyle.Render(fmt.Sprintf("✓ Created %d/%d JIRA tickets", successCount, len(projects))))
+	}
+}
+
+func postBulkTicketsToSlack(webhookURL string, tickets []createdTicket, config jiraConfig) error {
+	// Build a formatted string with all tickets
+	var ticketsText strings.Builder
+	for i, t := range tickets {
+		if i > 0 {
+			ticketsText.WriteString("\n")
+		}
+		ticketsText.WriteString(fmt.Sprintf("%s: %s - %s", t.project, t.issueKey, t.issueURL))
+	}
+
+	// Join labels and components as comma-separated strings
+	labelsStr := strings.Join(config.Labels, ", ")
+	componentsStr := strings.Join(config.Components, ", ")
+
+	payload := map[string]string{
+		"tickets":    ticketsText.String(),
+		"count":      fmt.Sprintf("%d", len(tickets)),
+		"team":       config.Team,
+		"labels":     labelsStr,
+		"components": componentsStr,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Slack payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create Slack request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("Slack request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Slack webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 func main() {
 	if err := loadDotEnv(".env"); err != nil {
 		fmt.Printf("%s %v\n", errorStyle.Render("Error loading .env:"), err)
@@ -1374,6 +1704,10 @@ func main() {
 				fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("Error: %v", err)))
 				os.Exit(1)
 			}
+		}
+		// Handle bulk JIRA ticket creation if requested
+		if finalModel.bulkJiraRequested && len(finalModel.outdatedProjects) > 0 {
+			createBulkJiraTicket(finalModel.outdatedProjects)
 		}
 	}
 }
