@@ -93,11 +93,15 @@ func main() {
 
 	// Post to Slack if flag is set
 	if *postToSlackFlag {
-		slackWebhookURL := "https://hooks.slack.com/triggers/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"
-		if err := postToSlack(slackWebhookURL, issueKey, ticketURL, *summary, *description, config); err != nil {
-			fmt.Printf("\n⚠ Warning: Failed to post to Slack: %v\n", err)
+		slackWebhookURL := os.Getenv("SLACK_WEBHOOK_URL")
+		if slackWebhookURL == "" {
+			fmt.Printf("\n⚠ Warning: SLACK_WEBHOOK_URL not set in environment variables\n")
 		} else {
-			fmt.Printf("\n✓ Posted to Slack\n")
+			if err := postToSlack(slackWebhookURL, issueKey, ticketURL, *summary, *description, config); err != nil {
+				fmt.Printf("\n⚠ Warning: Failed to post to Slack: %v\n", err)
+			} else {
+				fmt.Printf("\n✓ Posted to Slack\n")
+			}
 		}
 	}
 }
