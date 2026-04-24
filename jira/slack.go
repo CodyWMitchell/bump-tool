@@ -6,17 +6,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 func postToSlack(webhookURL, ticketKey, ticketURL, summary, description string, config *Config) error {
+	// Format single ticket in same format as bulk (project: KEY - URL)
+	// Extract project name from summary (format: "Bump project-name to hash")
+	projectName := "unknown"
+	if len(summary) > 5 && summary[:5] == "Bump " {
+		parts := strings.Split(summary[5:], " to ")
+		if len(parts) > 0 {
+			projectName = parts[0]
+		}
+	}
+
+	ticketsText := fmt.Sprintf("%s: %s - %s", projectName, ticketKey, ticketURL)
+
 	payload := map[string]string{
-		"jira_ticket_key": ticketKey,
-		"jira_ticket_url": ticketURL,
-		"summary":         summary,
-		"description":     description,
-		"team":            config.Team,
-		"labels":          joinStrings(config.Labels),
-		"components":      joinStrings(config.Components),
+		"tickets":    ticketsText,
+		"count":      "1",
+		"team":       config.Team,
+		"labels":     joinStrings(config.Labels),
+		"components": joinStrings(config.Components),
 	}
 
 	jsonData, err := json.Marshal(payload)
