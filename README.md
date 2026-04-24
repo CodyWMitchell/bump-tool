@@ -43,6 +43,11 @@ GITLAB_BASE_URL=https://gitlab.com
 APP_INTERFACE_FORK_PROJECT=your-username/app-interface
 APP_INTERFACE_UPSTREAM_PROJECT=service/app-interface
 APP_INTERFACE_TARGET_BRANCH=master
+
+# Claude Code summary blurb (optional; off by default)
+BUMP_BRAT_USE_CLAUDE_SUMMARY=false
+# Optional: set to force `claude --resume <session-id>`
+BUMP_BRAT_CLAUDE_SESSION_ID=
 ```
 
 ### Setting up GitHub token
@@ -67,6 +72,17 @@ APP_INTERFACE_TARGET_BRANCH=master
    - `APP_INTERFACE_FORK_PROJECT` (your fork path)
    - `APP_INTERFACE_UPSTREAM_PROJECT` (usually `service/app-interface`)
    - Optional: `GITLAB_BASE_URL`, `APP_INTERFACE_TARGET_BRANCH`
+
+### Optional: AI commit summary via local Claude Code session
+
+If you want MR descriptions to include a short AI blurb that summarizes the full commit set:
+
+1. Enable:
+   - `BUMP_BRAT_USE_CLAUDE_SUMMARY=true`
+2. Optional: if you specifically want to reuse a known Claude session, also set:
+   - `BUMP_BRAT_CLAUDE_SESSION_ID=<session-id>`
+
+When enabled, bump-brat uses your local Claude auth/session context by default to generate a concise summary from all included commits. If `BUMP_BRAT_CLAUDE_SESSION_ID` is set, it will use `--resume` for that session. The same blurb is printed in terminal output so you can reuse it in JIRA descriptions.
 
 ## Controls
 

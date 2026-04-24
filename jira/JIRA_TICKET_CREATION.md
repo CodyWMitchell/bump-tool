@@ -62,6 +62,8 @@ Edit `jira_fields_config.json` with your desired values:
 
 ## Usage
 
+If you generated a bump MR with bump-brat and enabled `BUMP_BRAT_USE_CLAUDE_SUMMARY=true`, reuse the printed AI summary blurb in your JIRA `--description` for a consistent short changelog.
+
 ### Basic Usage
 
 ```bash
