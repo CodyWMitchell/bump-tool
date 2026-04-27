@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -480,6 +481,86 @@ func shortSHA(ref string) string {
 		return ref
 	}
 	return ref[:7]
+}
+
+func envBool(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func buildAISummaryPrompt(p project, commits []commit) string {
+	var b strings.Builder
+	b.WriteString("You are writing a concise release blurb for engineering stakeholders.\n")
+	b.WriteString("Return exactly 1-2 sentences and no bullet list.\n")
+	b.WriteString("Mention the project and summarize what changed across these commits.\n\n")
+	b.WriteString(fmt.Sprintf("Project: %s\n", p.name))
+	b.WriteString(fmt.Sprintf("From: %s\n", p.currentRef))
+	b.WriteString(fmt.Sprintf("To: %s\n", p.latestRef))
+	b.WriteString("Commits:\n")
+	for _, c := range commits {
+		b.WriteString(fmt.Sprintf("- %s (%s)\n", c.message, shortSHA(c.sha)))
+	}
+	return b.String()
+}
+
+func generateClaudeAISummary(p project, commits []commit) (string, error) {
+	if !envBool("BUMP_BRAT_USE_CLAUDE_SUMMARY") {
+		return "", nil
+	}
+	if len(commits) == 0 {
+		return "", nil
+	}
+
+	sessionID := strings.TrimSpace(os.Getenv("BUMP_BRAT_CLAUDE_SESSION_ID"))
+	claudeBin := strings.TrimSpace(os.Getenv("BUMP_BRAT_CLAUDE_BIN"))
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	timeoutSeconds := envInt("BUMP_BRAT_CLAUDE_SUMMARY_TIMEOUT_SECONDS", 60)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	prompt := buildAISummaryPrompt(p, commits)
+	args := []string{"-p", prompt}
+	if sessionID != "" {
+		args = []string{"--resume", sessionID, "-p", prompt}
+	}
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("claude summary timed out after %d seconds", timeoutSeconds)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to run Claude summary command: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+
+	summary := strings.TrimSpace(string(output))
+	if summary == "" {
+		return "", fmt.Errorf("claude summary output was empty")
+	}
+
+	// Keep MR/JIRA blurbs intentionally short.
+	if len(summary) > 500 {
+		summary = summary[:500]
+	}
+	return summary, nil
 }
 
 func normalizeRepoURL(repoURL string) string {
@@ -1264,6 +1345,15 @@ func processProject(p project) error {
 	oldHashLink := fmt.Sprintf("[%s](%s)", shortSHA(p.currentRef), githubCommitURL(p.repoURL, p.currentRef))
 	newHashLink := fmt.Sprintf("[%s](%s)", shortSHA(p.latestRef), githubCommitURL(p.repoURL, p.latestRef))
 	description := fmt.Sprintf("Bumps %s from %s to %s\n\n", p.name, oldHashLink, newHashLink)
+	aiSummary, err := generateClaudeAISummary(p, commits)
+	if err != nil {
+		fmt.Printf("   %s AI summary unavailable: %v\n", updateStyle.Render("Warning:"), err)
+	} else if aiSummary != "" {
+		fmt.Println(sectionStyle.Render("AI summary"))
+		fmt.Printf("   %s\n\n", aiSummary)
+		description += fmt.Sprintf("### AI summary\n%s\n\n", aiSummary)
+	}
+	description += "### Included commits\n"
 	for _, c := range commits {
 		commitLink := fmt.Sprintf("[%s](%s)", shortSHA(c.sha), githubCommitURL(c.repoURL, c.sha))
 		description += fmt.Sprintf("- %s (%s)\n", c.message, commitLink)
@@ -1676,6 +1766,15 @@ func main() {
 
 	if os.Getenv("GITHUB_TOKEN") == "" {
 		fmt.Println(helpStyle.Render("  Optional: set GITHUB_TOKEN to avoid GitHub API rate limits"))
+	}
+	if envBool("BUMP_BRAT_USE_CLAUDE_SUMMARY") {
+		if strings.TrimSpace(os.Getenv("BUMP_BRAT_CLAUDE_SESSION_ID")) == "" {
+			fmt.Println(greenStyle.Render("✓ Claude summary blurb enabled"))
+			fmt.Println(helpStyle.Render("  Using default local Claude auth/session context"))
+		} else {
+			fmt.Println(greenStyle.Render("✓ Claude summary blurb enabled"))
+			fmt.Println(helpStyle.Render("  Using configured resume session ID"))
+		}
 	}
 	fmt.Println()
 

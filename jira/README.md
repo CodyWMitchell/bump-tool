@@ -60,6 +60,8 @@ JIRA_USERNAME=your-email@redhat.com
 JIRA_API_TOKEN=your-jira-api-token
 ```
 
+If you use bump-brat with `BUMP_BRAT_USE_CLAUDE_SUMMARY=true`, copy the printed AI summary blurb into your JIRA description to keep MR and JIRA context aligned.
+
 ## Usage
 
 ### Create a Ticket
