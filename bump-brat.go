@@ -1294,13 +1294,13 @@ func processProject(p project) error {
 	}
 
 	fmt.Println(sectionStyle.Render("Syncing app-interface fork with upstream"))
-	if err := runGitWithLiveProgress("", "cloning fork", "clone", "--progress", forkRepoURL, repoDir); err != nil {
+	if err := runGitWithLiveProgress("", "cloning fork", "clone", "--depth", "1", "--single-branch", "--no-tags", "--progress", forkRepoURL, repoDir); err != nil {
 		return err
 	}
 	if err := runGitWithLiveProgress(repoDir, "adding upstream remote", "remote", "add", "upstream", upstreamRepoURL); err != nil {
 		return err
 	}
-	if err := runGitWithLiveProgress(repoDir, "fetching upstream branch", "fetch", "--progress", "upstream", settings.targetBranch); err != nil {
+	if err := runGitWithLiveProgress(repoDir, "fetching upstream branch", "fetch", "--depth", "1", "--progress", "upstream", settings.targetBranch); err != nil {
 		return err
 	}
 	if err := runGitWithLiveProgress(repoDir, "checking out synced base branch", "checkout", "-B", settings.targetBranch, fmt.Sprintf("upstream/%s", settings.targetBranch)); err != nil {
